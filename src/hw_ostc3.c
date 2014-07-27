@@ -34,9 +34,9 @@
 #define ISINSTANCE(device) dc_device_isinstance((device), &hw_ostc3_device_vtable)
 
 #define EXITCODE(rc) \
-( \
+	( \
 	rc == -1 ? DC_STATUS_IO : DC_STATUS_TIMEOUT \
-)
+	)
 
 #define SZ_DISPLAY    16
 #define SZ_CUSTOMTEXT 60
@@ -59,6 +59,12 @@
 #define RESET      0x78
 #define INIT       0xBB
 #define EXIT       0xFF
+
+// Byte extration, compatible littleendian or bigendian.
+#define LOW(x)      ((unsigned char)((x) % 256))
+#define HIGH(x)     ((unsigned char)((x / (1<<8)) % 256))
+#define UPPER(x)    ((unsigned char)((x / (1<<16)) % 256))
+#define UP32(x)     ((unsigned char)((x / (1<<24)) % 256))
 
 typedef struct hw_ostc3_device_t {
 	dc_device_t base;
@@ -103,12 +109,12 @@ hw_ostc3_strncpy (unsigned char *data, unsigned int size, const char *text)
 
 static dc_status_t
 hw_ostc3_transfer (hw_ostc3_device_t *device,
-                  dc_event_progress_t *progress,
-                  unsigned char cmd,
-                  const unsigned char input[],
-                  unsigned int isize,
-                  unsigned char output[],
-                  unsigned int osize)
+		   dc_event_progress_t *progress,
+		   unsigned char cmd,
+		   const unsigned char input[],
+		   unsigned int isize,
+		   unsigned char output[],
+		   unsigned int osize)
 {
 	dc_device_t *abstract = (dc_device_t *) device;
 
@@ -360,7 +366,7 @@ hw_ostc3_device_foreach (dc_device_t *abstract, dc_dive_callback_t callback, voi
 
 	// Download the logbook headers.
 	rc = hw_ostc3_transfer (device, &progress, HEADER,
-              NULL, 0, header, RB_LOGBOOK_SIZE * RB_LOGBOOK_COUNT);
+				NULL, 0, header, RB_LOGBOOK_SIZE * RB_LOGBOOK_COUNT);
 	if (rc != DC_STATUS_SUCCESS) {
 		ERROR (abstract->context, "Failed to read the header.");
 		free (header);
@@ -459,7 +465,7 @@ hw_ostc3_device_foreach (dc_device_t *abstract, dc_dive_callback_t callback, voi
 		// Download the dive.
 		unsigned char number[1] = {idx};
 		rc = hw_ostc3_transfer (device, &progress, DIVE,
-			number, sizeof (number), profile, length);
+					number, sizeof (number), profile, length);
 		if (rc != DC_STATUS_SUCCESS) {
 			ERROR (abstract->context, "Failed to read the dive.");
 			free (profile);
@@ -619,3 +625,166 @@ hw_ostc3_device_config_reset (dc_device_t *abstract)
 
 	return DC_STATUS_SUCCESS;
 }
+
+dc_status_t
+hw_ostc3_erase_range(dc_device_t *abstract, unsigned int addr, unsigned int size)
+{
+	hw_ostc3_device_t *device = (hw_ostc3_device_t *) abstract;
+
+	//Convert size to number of pages, rounded up
+	size = ((size + 4095) / 4096);
+
+	//Erase just the needed pages
+	unsigned char erase_buffer[4];
+	erase_buffer[0] = UPPER(addr);
+	erase_buffer[1] = HIGH(addr);
+	erase_buffer[2] = LOW(addr);
+	erase_buffer[3] = LOW(size);
+
+	unsigned char cmd[1] = {0x42};
+	int n = serial_write(device->port, cmd, 1); //Command
+
+	// Read the reply.
+	unsigned char reply[1] = {0};
+	n = serial_read (device->port, reply, sizeof (reply));
+
+	if (reply != 0x42) {
+		ERROR (abstract->context, "eraseRange(1)");
+		return DC_STATUS_CANCELLED;
+	}
+
+	serial_write(device->port, erase_buffer, 4);
+
+	//Wait (120/4)ms by block of 4K, plus 3% VAT to be sure.
+	serial_sleep(device->port, 40 + size * 31);
+
+	n = serial_read (device->port, reply, sizeof (reply));
+
+	if (reply != 0x42) {
+		ERROR (abstract->context, "eraseRange(2)");
+		return DC_STATUS_CANCELLED;
+	}
+
+	return DC_STATUS_SUCCESS;
+}
+
+dc_status_t
+hw_ostc3_write_block(dc_device_t *abstract, unsigned int addr, unsigned char *data, unsigned int size)
+{
+	hw_ostc3_device_t *device = (hw_ostc3_device_t *) abstract;
+
+	unsigned char buffer[3];
+	buffer[0] = UPPER(addr);
+	buffer[1] = HIGH(addr);
+	buffer[2] = LOW(addr);
+
+	unsigned char cmd[1] = {0x30};
+	serial_write(device->port, cmd, sizeof(cmd));
+
+	//Read the reply
+	unsigned char reply[1] = {0};
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x30) {
+		ERROR (abstract->context, "Write Block Failed: 1");
+		return DC_STATUS_CANCELLED;
+	}
+
+	serial_write(device->port, buffer, 3);
+	serial_sleep(device->port, 10);
+
+	serial_write(device->port, data, size);
+
+	serial_sleep(device->port, 150);
+
+	//Read the reply
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x4C) {
+		ERROR (abstract->context, "Write Block Failed: 2");
+		return DC_STATUS_CANCELLED;
+	}
+
+	return DC_STATUS_SUCCESS;
+}
+
+dc_status_t
+hw_ostc3_read_block(dc_device_t *abstract, unsigned int addr, unsigned char *ptr, unsigned int size)
+{
+	hw_ostc3_device_t *device = (hw_ostc3_device_t *) abstract;
+
+	unsigned char buffer[6];
+	buffer[0] = UPPER(addr);
+	buffer[1] = HIGH(addr);
+	buffer[2] = LOW(addr);
+	buffer[3] = UPPER(size);
+	buffer[4] = HIGH(size);
+	buffer[5] = LOW(size);
+
+	unsigned char cmd[1] = {0x20};
+	serial_write(device->port, cmd, sizeof(cmd));
+
+	//Read the reply
+	unsigned char reply[1] = {0};
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x20) {
+		ERROR (abstract->context, "Write Block Failed: 1");
+		return DC_STATUS_CANCELLED;
+	}
+
+	serial_write(device->port, buffer, 3);
+
+	//Read the reply
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x4C) {
+		ERROR (abstract->context, "Write Block Failed: 2");
+		return DC_STATUS_CANCELLED;
+	}
+
+	return DC_STATUS_SUCCESS;
+}
+
+dc_status_t
+hw_ostc3_upgrade_firmware(dc_device_t *abstract, unsigned int checksum)
+{
+	hw_ostc3_device_t *device = (hw_ostc3_device_t *) abstract;
+
+	unsigned char buffer[5];
+	buffer[0] = LOW(checksum);
+	buffer[1] = HIGH(checksum);
+	buffer[2] = UPPER(checksum);
+	buffer[3] = UP32(checksum);
+
+	// Compute magic checksum's checksum.
+	buffer[4] = 0x55;
+	buffer[4] ^= buffer[0]; buffer[4] =(buffer[4]<<1 | buffer[4]>>7);
+	buffer[4] ^= buffer[1]; buffer[4] =(buffer[4]<<1 | buffer[4]>>7);
+	buffer[4] ^= buffer[2]; buffer[4] =(buffer[4]<<1 | buffer[4]>>7);
+	buffer[4] ^= buffer[3]; buffer[4] =(buffer[4]<<1 | buffer[4]>>7);
+
+	unsigned char bootloader_cmd[1] = {0x50};
+	serial_write(device->port, bootloader_cmd, sizeof(bootloader_cmd));
+
+	//Read the reply
+	unsigned char reply[1] = {0};
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x50) {
+		ERROR (abstract->context, "Flashing start failed");
+		return DC_STATUS_CANCELLED;
+	}
+
+	serial_write(device->port, buffer, 3);
+
+	//Read the reply
+	serial_read (device->port, reply, sizeof (reply));
+	if (reply != 0x4C) {
+		ERROR (abstract->context, "Flashing failed.");
+		return DC_STATUS_CANCELLED;
+	}
+
+	//NOTE: the device never returns, because it always does a reset,
+	//	with or without reprogramming.
+	serial_sleep(device->port, 500);
+	serial_close(device->port);
+
+	return DC_STATUS_SUCCESS;
+}
+

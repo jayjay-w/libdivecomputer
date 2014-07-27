@@ -58,6 +58,18 @@ hw_ostc3_device_config_write (dc_device_t *abstract, unsigned int config, const 
 dc_status_t
 hw_ostc3_device_config_reset (dc_device_t *abstract);
 
+dc_status_t
+hw_ostc3_erase_range(dc_device_t *abstract, unsigned int addr, unsigned int size);
+
+dc_status_t
+hw_ostc3_write_block(dc_device_t *abstract, unsigned int addr, unsigned char *data, unsigned int size);
+
+dc_status_t
+hw_ostc3_read_block(dc_device_t *abstract, unsigned int addr, unsigned char *ptr, unsigned int size);
+
+dc_status_t
+hw_ostc3_upgrade_firmware(dc_device_t *abstract, unsigned int checksum);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */
